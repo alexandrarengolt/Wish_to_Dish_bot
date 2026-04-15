@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import aiohttp
 import os
 import sys
 import ssl
@@ -21,6 +22,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
+
+connector = aiohttp.TCPConnector(ssl=ssl_context)
+# Инициализируем сессию и бота правильно
+session = AiohttpSession(connector=connector)
+bot = Bot(token=BOT_TOKEN, session=session)
+dp = Dispatcher()
 
 # 3. Инициализация сессии и бота (ТОЛЬКО ОДИН РАЗ)
 session = AiohttpSession(api_kwargs={"ssl": ssl_context})
