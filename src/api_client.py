@@ -5,14 +5,15 @@ from deep_translator import GoogleTranslator
 
 load_dotenv()
 
-API_KEY = os.getenv("FOOD_API_KEY")
+# API_KEY = os.getenv("FOOD_API_KEY")
+API_KEY = "5bbdab45362d4785bbd2a81045b1579d"
 BASE_URL = "https://api.spoonacular.com/recipes/complexSearch"
 
 # Инициализируем переводчики
 ru_to_en = GoogleTranslator(source='ru', target='en')
 en_to_ru = GoogleTranslator(source='en', target='ru')
 
-async def search_recipes(ingredients: str, diet: str = None, max_time: int = None):
+async def search_recipes(ingredients: str, diet: str = None, max_time: int = None, number: int = 3):
     try:
         # 1. Перевод ввода
         try:
@@ -26,8 +27,7 @@ async def search_recipes(ingredients: str, diet: str = None, max_time: int = Non
             "query": translated_query, 
             "addRecipeInformation": True,
             "fillIngredients": True,
-            "number": 3
-                }
+            "number": number}
         
         if diet: params["diet"] = diet
         if max_time: params["maxReadyTime"] = max_time
