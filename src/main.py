@@ -7,25 +7,34 @@ import aiohttp
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher, F # Важно: импортируем F
+from aiogram import Bot, Dispatcher, F, types # Важно: импортируем F
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from api_client import search_recipes
+from api_client import search_recipes, get_nutrition_estimate
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from dotenv import load_dotenv
+
+# Импортируем вашу функцию поиска
+from api_client import search_recipes
 
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 load_dotenv()
+# Рекомендуется использовать os.getenv("BOT_TOKEN") для безопасности
 BOT_TOKEN = "8792816956:AAGia1B4_ThRsgHzf9Yy-SzCZ9NPGFRnAG4"
 
 dp = Dispatcher()
 
+# Хранилища данных
 user_history = {}
 user_sessions = {}
 messages_to_delete = {}
+user_diet = {}  # Для хранения выбранной диеты {user_id: "diet_name"}
 
-# 1. Кнопки (Reply Keyboard)
+# --- КЛАВИАТУРЫ ---
+
 def get_yes_no_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -35,11 +44,47 @@ def get_yes_no_kb():
         one_time_keyboard=True
     )
 
-# 1. Обработчик команды /start
-@dp.message(Command("start"))
+def get_diet_keyboard():
+    builder = InlineKeyboardBuilder()
+    diets = {
+        "Vegetarian": "Вегетарианская",
+        "Vegan": "Веганская",
+        "Gluten Free": "Без глютена",
+        "Ketogenic": "Кето",
+        "Paleo": "Палео"
+    }
+    for callback_data, display_name in diets.items():
+        builder.row(types.InlineKeyboardButton(
+            text=display_name, 
+            callback_data=f"diet_{callback_data}")
+        )
+    builder.row(types.InlineKeyboardButton(text="❌ Сбросить фильтр", callback_data="diet_none"))
+    return builder.as_markup()
+
+# --- ОБРАБОТЧИКИ ---
+
+@dp.callback_query(lambda c: c.data.startswith('diet_'))
+async def process_diet_selection(callback_query: types.CallbackQuery):
+    selected_diet = callback_query.data.split('_')[1]
+    user_id = callback_query.from_user.id
+    
+    if selected_diet == "none":
+        user_diet[user_id] = None
+        text = "Фильтр диет сброшен. Пришлите список продуктов."
+    else:
+        user_diet[user_id] = selected_diet
+        text = f"Выбрана диета: {selected_diet}. Пришлите список продуктов."
+    
+    await callback_query.message.edit_text(text)
+    await callback_query.answer()
+
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer("Привет! Я ИИ-повар. Пришли мне список продуктов через запятую.")
+    await message.answer(
+        "Привет! Я ваш ИИ-повар. 👨‍🍳\n"
+        "Сначала выбери диету (если нужно), а затем пришли список продуктов через запятую.",
+        reply_markup=get_diet_keyboard()
+    )
 
 @dp.message(F.text == "Да, давай еще!")
 async def handle_more(message: Message, bot: Bot):
@@ -52,103 +97,93 @@ async def handle_more(message: Message, bot: Bot):
 
     session["limit"] += 3
     current_limit = session["limit"]
+    selected_diet = user_diet.get(user_id)
 
     try:
         await bot.delete_message(chat_id=user_id, message_id=message.message_id)
     except: pass
 
-    await message.answer(f"🔄 Уже обновляю список рецептов!")
+    await message.answer(f"🔄 Обновляю список рецептов...")
     
-    # Запрашиваем новое количество
-    data = await search_recipes(session["ingredients"], number=current_limit)
+    # Передаем и ингредиенты, и диету, и лимит
+    data = await search_recipes(session["ingredients"], diet=selected_diet, number=current_limit)
     await show_recipes(message, data, bot)
 
 @dp.message(F.text == "Нет, спасибо")
 async def handle_no(message: Message, bot: Bot):
     user_id = message.from_user.id
-    
-    # 1. Удаляем только ПОСЛЕДНЕЕ сообщение бота (там, где был вопрос и кнопки)
-    # Чтобы в чате не висел вопрос "Хотите еще?", на который уже ответили
     if user_id in messages_to_delete:
         try:
-            # Последний ID в списке — это обычно сообщение с вопросом и кнопками
             last_msg_id = messages_to_delete[user_id][-1]
             await bot.delete_message(chat_id=user_id, message_id=last_msg_id)
-        except Exception:
-            pass
-        
-        # Очищаем список ID, так как сессия поиска завершена
+        except: pass
         messages_to_delete[user_id] = []
 
-    # 2. Удаляем сообщение пользователя "Нет, спасибо" для чистоты (по желанию)
     try:
         await bot.delete_message(chat_id=user_id, message_id=message.message_id)
-    except:
-        pass
+    except: pass
 
-    # 3. Отправляем финальный текст и скрываем клавиатуру
     await message.answer(
-        "Приятного аппетита! 👨‍🍳\nРецепты выше сохранены в истории чата.",
+        "Приятного аппетита! 👨‍🍳\nРецепты выше сохранены. Для нового поиска просто пришли продукты.",
         reply_markup=ReplyKeyboardRemove()
     )
-    
-    # Сбрасываем сессию, чтобы следующий поиск начался с 3 блюд
     if user_id in user_sessions:
         del user_sessions[user_id]
 
 @dp.message()
 async def handle_ingredients(message: Message, bot: Bot):
     user_id = message.from_user.id
-    # Инициализируем сессию: ставим лимит 3
+    selected_diet = user_diet.get(user_id)
+    
+    # Инициализируем сессию
     user_sessions[user_id] = {"ingredients": message.text, "limit": 3}
     
-    await message.answer(f"🔍 Ищу рецепты для: {message.text}...")
+    diet_text = f" (Диета: {selected_diet})" if selected_diet else ""
+    await message.answer(f"🔍 Ищу рецепты для: {message.text}{diet_text}...")
     
-    # Запрашиваем 3 штуки
-    data = await search_recipes(message.text, number=3)
+    # Вызываем поиск с учетом диеты
+    data = await search_recipes(message.text, diet=selected_diet, number=3)
     await show_recipes(message, data, bot)
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 async def clear_previous_messages(bot: Bot, user_id: int):
     if user_id in messages_to_delete:
         for msg_id in messages_to_delete[user_id]:
             try:
                 await bot.delete_message(chat_id=user_id, message_id=msg_id)
-            except Exception:
-                # Игнорируем ошибки (например, если сообщение уже удалено вручную)
-                pass
-        messages_to_delete[user_id] = [] # Очищаем список после удаления
+            except: pass
+        messages_to_delete[user_id] = []
 
-# Вспомогательная функция для вывода рецептов
 async def show_recipes(message: Message, data, bot: Bot):
     user_id = message.from_user.id
-    
-    # Сначала удаляем всё старое
     await clear_previous_messages(bot, user_id)
     
     if not data or not data.get("results"):
-        msg = await message.answer("Ничего не нашлось.")
+        msg = await message.answer("Ничего не нашлось. Попробуйте изменить продукты или сбросить диету.", 
+                                   reply_markup=get_diet_keyboard())
         messages_to_delete[user_id] = [msg.message_id]
         return
 
     new_ids = []
     for recipe in data["results"]:
+        ingredients_raw = recipe.get("extendedIngredients", [])
+        ingredients_text = ", ".join([i.get("original", "") for i in ingredients_raw])
         title = recipe.get("title_ru", recipe.get("title", "Без названия"))
-        caption = f"🍴 *{title}*\n⏱ {recipe.get('readyInMinutes', '??')} мин.\n🔗 [Рецепт]({recipe.get('sourceUrl', '#')})"
+        nutrition = await get_nutrition_estimate(title, ingredients_text)
+        caption = f"🍴 *{title}*\n" f"📊 {nutrition}\n" f"⏱ {recipe.get('readyInMinutes', '??')} мин.\n🔗 [Рецепт]({recipe.get('sourceUrl', '#')})"
         
         try:
             if recipe.get("image"):
                 res = await message.answer_photo(photo=recipe.get("image"), caption=caption, parse_mode="Markdown")
             else:
                 res = await message.answer(caption, parse_mode="Markdown")
-            new_ids.append(res.message_id) # Запоминаем ID сообщения
+            new_ids.append(res.message_id)
         except Exception as e:
-            logging.error(f"Ошибка отправки сообщения: {e}")
+            logging.error(f"Ошибка отправки: {e}")
 
-    # Добавляем вопрос с кнопками и сохраняем его ID
     question = await message.answer("Хотите посмотреть другие рецепты?", reply_markup=get_yes_no_kb())
     new_ids.append(question.message_id)
-    
-    # Сохраняем все новые ID для следующей очистки
     messages_to_delete[user_id] = new_ids
 
 async def main():
@@ -166,7 +201,7 @@ async def main():
     )
 
     logging.basicConfig(level=logging.INFO)
-    print("🚀 Бот запущен и готов к работе!")
+    print("🚀 Бот запущен!")
     
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
